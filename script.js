@@ -1,682 +1,454 @@
-/* =========================================================================
-   THE LAST CHAPTER — an interactive 3D book
-   Three.js scene driven by scroll (GSAP ScrollTrigger) + gentle mouse parallax.
-   ========================================================================= */
+(() => {
+  'use strict';
 
-import * as THREE from 'three';
+  const $ = (id) => document.getElementById(id);
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const isMobile = matchMedia('(max-width: 700px)').matches || 'ontouchstart' in window;
+  const COLORS = ['#9B87F5', '#F5D6A0', '#FFFFFF', '#6FA8FF', '#FF8FB8', '#7EE0C3', '#C9A0FF'];
 
-gsap.registerPlugin(ScrollTrigger);
+  /* ============ 2D FX: confetti + sparkles ============ */
+  const fx = $('fx');
+  const fctx = fx.getContext('2d');
+  let W = 0, H = 0;
+  const pieces = [];
+  const sparks = [];
 
-/* ---------------------------------------------------------------------
-   0. Environment / quality tiers
-   --------------------------------------------------------------------- */
-
-const isMobile = window.matchMedia('(max-width: 768px)').matches ||
-                  (navigator.maxTouchPoints > 2 && window.innerWidth < 1024);
-const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-const QUALITY = {
-  dustCount: isMobile ? 140 : 420,
-  glowCount: isMobile ? 12 : 40,
-  shadowMapSize: isMobile ? 768 : 1536,
-  pixelRatioCap: isMobile ? 1.6 : 2,
-  rays: isMobile ? 1 : 3,
-};
-
-/* ---------------------------------------------------------------------
-   1. Renderer / scene / camera
-   --------------------------------------------------------------------- */
-
-const canvas = document.getElementById('webgl');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY.pixelRatioCap));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-const scene = new THREE.Scene();
-const BG_COLOR = 0x0a0908;
-scene.background = new THREE.Color(BG_COLOR);
-scene.fog = new THREE.FogExp2(BG_COLOR, 0.095);
-
-const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 60);
-camera.position.set(2.2, 2.05, 7.1);
-
-/* ---------------------------------------------------------------------
-   2. Lighting — warm key, soft fill, cool rim
-   --------------------------------------------------------------------- */
-
-const hemi = new THREE.HemisphereLight(0x4a3b2a, 0x07060a, 0.4);
-scene.add(hemi);
-
-const keyLight = new THREE.SpotLight(0xffd9ac, 6.5, 22, Math.PI / 6.2, 0.45, 1.6);
-keyLight.position.set(2.6, 5.4, 3.2);
-keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(QUALITY.shadowMapSize, QUALITY.shadowMapSize);
-keyLight.shadow.bias = -0.0018;
-keyLight.shadow.radius = 5;
-keyLight.shadow.camera.near = 2;
-keyLight.shadow.camera.far = 14;
-scene.add(keyLight);
-scene.add(keyLight.target);
-keyLight.target.position.set(0, 0.95, 0);
-
-const fillLight = new THREE.PointLight(0xffb27a, 0.5, 10, 2);
-fillLight.position.set(-2.1, 0.9, 3.4);
-scene.add(fillLight);
-
-const rimLight = new THREE.PointLight(0x6b7dd6, 1.0, 13, 2);
-rimLight.position.set(-1.6, 2.6, -3.3);
-scene.add(rimLight);
-
-/* ---------------------------------------------------------------------
-   3. Ground + soft contact glow (cheap "reflection")
-   --------------------------------------------------------------------- */
-
-const GROUND_Y = -0.05;
-
-const ground = new THREE.Mesh(
-  new THREE.CircleGeometry(9, 64),
-  new THREE.MeshStandardMaterial({ color: 0x0c0a08, roughness: 0.55, metalness: 0.2 })
-);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = GROUND_Y;
-ground.receiveShadow = true;
-scene.add(ground);
-
-function makeRadialGlowTexture(inner, outer) {
-  const size = 256;
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const ctx = c.getContext('2d');
-  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  g.addColorStop(0, inner);
-  g.addColorStop(1, outer);
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, size, size);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-const contactGlow = new THREE.Mesh(
-  new THREE.CircleGeometry(2.4, 48),
-  new THREE.MeshBasicMaterial({
-    map: makeRadialGlowTexture('rgba(255,214,160,0.16)', 'rgba(255,214,160,0)'),
-    transparent: true,
-    depthWrite: false,
-  })
-);
-contactGlow.rotation.x = -Math.PI / 2;
-contactGlow.position.y = GROUND_Y + 0.01;
-scene.add(contactGlow);
-
-/* ---------------------------------------------------------------------
-   4. Dust + glow particles
-   --------------------------------------------------------------------- */
-
-function makeDustSprite() {
-  const size = 64;
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const ctx = c.getContext('2d');
-  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  g.addColorStop(0, 'rgba(255,255,255,1)');
-  g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, size, size);
-  return new THREE.CanvasTexture(c);
-}
-
-const dustSprite = makeDustSprite();
-
-function makeParticleField(count, { size, opacity, color, spread, speed }) {
-  const positions = new Float32Array(count * 3);
-  const velocities = new Float32Array(count);
-  for (let i = 0; i < count; i++) {
-    positions[i * 3 + 0] = (Math.random() - 0.5) * spread.x;
-    positions[i * 3 + 1] = Math.random() * spread.y - 0.3;
-    positions[i * 3 + 2] = (Math.random() - 0.5) * spread.z;
-    velocities[i] = speed * (0.4 + Math.random() * 0.8);
+  function sizeFx() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    W = innerWidth; H = innerHeight;
+    fx.width = W * dpr; fx.height = H * dpr;
+    fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.PointsMaterial({
-    size, color, map: dustSprite, transparent: true, opacity,
-    depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
-  });
-  const points = new THREE.Points(geo, mat);
-  points.userData.velocities = velocities;
-  points.userData.spread = spread;
-  return points;
-}
 
-const dust = makeParticleField(QUALITY.dustCount, {
-  size: 0.022, opacity: 0.45, color: 0xd8c9a3,
-  spread: { x: 9, y: 5, z: 6 }, speed: 0.05,
-});
-dust.position.y = GROUND_Y;
-scene.add(dust);
-
-const glowMotes = makeParticleField(QUALITY.glowCount, {
-  size: 0.075, opacity: 0.85, color: 0xffd9a0,
-  spread: { x: 6, y: 4.5, z: 4 }, speed: 0.03,
-});
-glowMotes.position.y = GROUND_Y;
-scene.add(glowMotes);
-
-/* ---------------------------------------------------------------------
-   5. Subtle light rays
-   --------------------------------------------------------------------- */
-
-function makeRayTexture() {
-  const w = 64, h = 512;
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const ctx = c.getContext('2d');
-  const g = ctx.createLinearGradient(0, 0, 0, h);
-  g.addColorStop(0, 'rgba(255,224,180,0.55)');
-  g.addColorStop(0.6, 'rgba(255,224,180,0.08)');
-  g.addColorStop(1, 'rgba(255,224,180,0)');
-  const rg = ctx.createRadialGradient(w / 2, 0, 0, w / 2, 0, w / 2);
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, w, h);
-  ctx.globalCompositeOperation = 'destination-in';
-  ctx.fillStyle = rg;
-  rg.addColorStop(0, 'rgba(255,255,255,1)');
-  rg.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillRect(0, 0, w, h);
-  return new THREE.CanvasTexture(c);
-}
-
-const rayTexture = makeRayTexture();
-const rays = new THREE.Group();
-for (let i = 0; i < QUALITY.rays; i++) {
-  const ray = new THREE.Mesh(
-    new THREE.PlaneGeometry(1.1, 7),
-    new THREE.MeshBasicMaterial({
-      map: rayTexture, transparent: true, opacity: 0.06 + i * 0.01,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    })
-  );
-  ray.position.set(0.6 + i * 0.7, 3.2, 1.0 - i * 0.7);
-  ray.rotation.z = -0.32 + i * 0.05;
-  ray.rotation.y = 0.4;
-  rays.add(ray);
-}
-scene.add(rays);
-
-/* ---------------------------------------------------------------------
-   5b. Make sure the webfonts used inside canvas-baked textures are
-   actually loaded before we bake them — otherwise the cover/page art
-   would silently fall back to a generic serif and never update.
-   --------------------------------------------------------------------- */
-
-await Promise.all([
-  document.fonts.load('600 96px "Cormorant Garamond"'),
-  document.fonts.load('italic 400 64px "Cormorant Garamond"'),
-  document.fonts.load('600 70px "Cormorant Garamond"'),
-  document.fonts.load('italic 40px "Cormorant Garamond"'),
-  document.fonts.load('300 26px "Inter"'),
-]).catch(() => {});
-
-/* ---------------------------------------------------------------------
-   6. The book
-   --------------------------------------------------------------------- */
-
-const PAGE_W = 1.55;
-const PAGE_H = 2.15;
-const PAGE_T = 0.016;
-const COVER_T = 0.05;
-const LEAF_GAP = 0.012; // small spine gap so leaves read as distinct sheets
-
-const COLORS = {
-  coverBg: '#15100d',
-  coverEdge: 0x0e0b09,
-  pageBg: '#f1e6cf',
-  pageEdge: 0xe6d8b8,
-  endpaper: '#241a16',
-  ink: '#241c14',
-  brass: '#c9a769',
-};
-
-let fontsReady = false;
-
-function paperGrain(ctx, w, h, alpha) {
-  const g = ctx.createRadialGradient(w / 2, h / 2, h * 0.15, w / 2, h / 2, h * 0.78);
-  g.addColorStop(0, 'rgba(255,255,255,0.04)');
-  g.addColorStop(1, 'rgba(0,0,0,0.22)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, w, h);
-  for (let i = 0; i < 1400; i++) {
-    ctx.fillStyle = `rgba(0,0,0,${(Math.random() * alpha).toFixed(3)})`;
-    ctx.fillRect(Math.random() * w, Math.random() * h, 1, 1);
+  function makePiece(x, y, vx, vy, g, drag, max) {
+    pieces.push({
+      x, y, vx, vy, g, drag, max,
+      w: rand(6, 11), h: rand(4, 8),
+      rot: rand(0, 6.28), vr: rand(-6, 6),
+      flip: rand(0, 6.28), vf: rand(4, 10),
+      sway: rand(8, 36), sf: rand(1, 3), sp: rand(0, 6.28),
+      c: pick(COLORS), round: Math.random() < 0.2, t: 0
+    });
   }
-}
 
-function wrapText(ctx, text, maxWidth) {
-  const words = text.split(' ');
-  const lines = [];
-  let line = '';
-  for (const word of words) {
-    const test = line ? `${line} ${word}` : word;
-    if (ctx.measureText(test).width > maxWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = test;
+  function rain(n) {
+    for (let i = 0; i < n; i++) {
+      makePiece(rand(0, W), rand(-H * 0.7, -10), rand(-20, 20), rand(90, 190), 40, 0.2, 250);
     }
   }
-  if (line) lines.push(line);
-  return lines;
-}
 
-function newCanvas(w, h) {
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  return c;
-}
-
-function toTexture(canvas) {
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
-}
-
-function makeCoverFrontTexture() {
-  const w = 1024, h = 1424;
-  const c = newCanvas(w, h);
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = COLORS.coverBg;
-  ctx.fillRect(0, 0, w, h);
-  paperGrain(ctx, w, h, 0.1);
-
-  ctx.strokeStyle = 'rgba(201,167,105,0.55)';
-  ctx.lineWidth = 4;
-  ctx.strokeRect(46, 46, w - 92, h - 92);
-  ctx.strokeStyle = 'rgba(201,167,105,0.22)';
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(60, 60, w - 120, h - 120);
-
-  ctx.textAlign = 'center';
-  const titleY = h * 0.47;
-
-  ctx.font = '600 96px "Cormorant Garamond", serif';
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillText('THE LAST CHAPTER', w / 2 + 3, titleY + 3);
-  ctx.fillStyle = '#ecdfc2';
-  ctx.fillText('THE LAST CHAPTER', w / 2, titleY);
-
-  ctx.beginPath();
-  ctx.moveTo(w / 2 - 110, titleY + 46);
-  ctx.lineTo(w / 2 + 110, titleY + 46);
-  ctx.strokeStyle = 'rgba(201,167,105,0.5)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  ctx.font = 'italic 40px "Cormorant Garamond", serif';
-  ctx.fillStyle = 'rgba(236,223,194,0.78)';
-  ctx.fillText('A story waiting to be opened.', w / 2, titleY + 90);
-
-  return toTexture(c);
-}
-
-function makeEndpaperTexture() {
-  const w = 1024, h = 1424;
-  const c = newCanvas(w, h);
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = COLORS.endpaper;
-  ctx.fillRect(0, 0, w, h);
-  paperGrain(ctx, w, h, 0.08);
-  ctx.strokeStyle = 'rgba(201,167,105,0.28)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(50, 50, w - 100, h - 100);
-  ctx.save();
-  ctx.translate(w / 2, h / 2);
-  ctx.rotate(Math.PI / 4);
-  ctx.strokeStyle = 'rgba(201,167,105,0.35)';
-  ctx.strokeRect(-14, -14, 28, 28);
-  ctx.restore();
-  return toTexture(c);
-}
-
-function makePageTexture(text, { final = false, pageNumber } = {}) {
-  const w = 1024, h = 1424;
-  const c = newCanvas(w, h);
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = COLORS.pageBg;
-  ctx.fillRect(0, 0, w, h);
-  paperGrain(ctx, w, h, 0.045);
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = COLORS.ink;
-
-  const fontSize = final ? 70 : 64;
-  const style = final ? `600 ${fontSize}px "Cormorant Garamond", serif` : `italic 400 ${fontSize}px "Cormorant Garamond", serif`;
-  ctx.font = style;
-
-  const lines = wrapText(ctx, text, w * 0.66);
-  const lh = fontSize * 1.25;
-  const startY = h / 2 - ((lines.length - 1) * lh) / 2;
-  lines.forEach((ln, i) => {
-    ctx.fillText(ln, w / 2, startY + i * lh);
-  });
-
-  ctx.beginPath();
-  ctx.moveTo(w / 2 - 60, startY + lines.length * lh + 6);
-  ctx.lineTo(w / 2 + 60, startY + lines.length * lh + 6);
-  ctx.strokeStyle = 'rgba(36,28,20,0.3)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  if (pageNumber) {
-    ctx.font = '300 26px "Inter", sans-serif';
-    ctx.fillStyle = 'rgba(36,28,20,0.45)';
-    ctx.fillText(String(pageNumber), w / 2, h - 80);
+  function burst(n) {
+    const k = Math.min(Math.max(Math.min(W, H) / 700, 0.6), 1.3);
+    const per = Math.floor(n / 3);
+    const origins = [
+      [W / 2, H * 0.5, -Math.PI * 0.95, -Math.PI * 0.05, 1],
+      [0, H, -Math.PI * 0.42, -Math.PI * 0.12, 1.15],
+      [W, H, -Math.PI * 0.88, -Math.PI * 0.58, 1.15]
+    ];
+    origins.forEach(([ox, oy, a0, a1, boost]) => {
+      for (let i = 0; i < per; i++) {
+        const a = rand(a0, a1), s = rand(350, 950) * k * boost;
+        makePiece(ox, oy, Math.cos(a) * s, Math.sin(a) * s, 900, 1.6, 340);
+      }
+    });
+    for (let i = 0; i < n - per * 3; i++) makePiece(rand(0, W), rand(-H * 0.4, -10), rand(-30, 30), rand(120, 220), 60, 0.3, 280);
   }
 
-  return toTexture(c);
-}
-
-function makePageVersoTexture() {
-  const w = 1024, h = 1424;
-  const c = newCanvas(w, h);
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = COLORS.pageBg;
-  ctx.fillRect(0, 0, w, h);
-  paperGrain(ctx, w, h, 0.045);
-  ctx.save();
-  ctx.translate(w / 2, h / 2);
-  ctx.strokeStyle = 'rgba(36,28,20,0.16)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, -16); ctx.lineTo(16, 0); ctx.lineTo(0, 16); ctx.lineTo(-16, 0); ctx.closePath();
-  ctx.stroke();
-  ctx.restore();
-  return toTexture(c);
-}
-
-// A leaf is a hinge (Group, pivoted at the spine) containing a thin box mesh.
-function makeLeaf({ width, height, thickness, frontTex, backTex, edgeColor, castShadow = true }) {
-  const geo = new THREE.BoxGeometry(width, height, thickness, 1, 1, 1);
-  const frontMat = new THREE.MeshStandardMaterial({ map: frontTex, roughness: 0.82, metalness: 0.03 });
-  const backMat = new THREE.MeshStandardMaterial({ map: backTex, roughness: 0.82, metalness: 0.03 });
-  const edgeMat = new THREE.MeshStandardMaterial({ color: edgeColor, roughness: 0.75, metalness: 0.15 });
-  // BoxGeometry material slot order: [+x, -x, +y, -y, +z(front), -z(back)]
-  const mesh = new THREE.Mesh(geo, [edgeMat, edgeMat, edgeMat, edgeMat, frontMat, backMat]);
-  mesh.castShadow = castShadow;
-  mesh.receiveShadow = true;
-  mesh.position.x = width / 2 + LEAF_GAP;
-
-  const pivot = new THREE.Group();
-  pivot.add(mesh);
-  return pivot;
-}
-
-const book = new THREE.Group();
-book.position.set(-PAGE_W / 2, 1.02, 0);
-scene.add(book);
-
-const leafDepths = { back: 0, page4: 0.022, page3: 0.044, page2: 0.066, page1: 0.088, front: 0.112 };
-
-// Static base — back cover (never opens)
-const backCover = makeLeaf({
-  width: PAGE_W + 0.02, height: PAGE_H + 0.02, thickness: COVER_T,
-  frontTex: makeEndpaperTexture(), backTex: makeEndpaperTexture(),
-  edgeColor: COLORS.coverEdge,
-});
-backCover.position.z = leafDepths.back;
-book.add(backCover);
-
-// Static content page — the final spread (revealed once page3 turns)
-const page4 = makeLeaf({
-  width: PAGE_W, height: PAGE_H, thickness: PAGE_T,
-  frontTex: makePageTexture('THE END IS ONLY THE BEGINNING.', { final: true, pageNumber: 4 }),
-  backTex: makePageVersoTexture(),
-  edgeColor: COLORS.pageEdge,
-});
-page4.position.z = leafDepths.page4;
-book.add(page4);
-
-// Turning leaves, built bottom-up so each reveals the static leaf beneath it
-const page3 = makeLeaf({
-  width: PAGE_W, height: PAGE_H, thickness: PAGE_T,
-  frontTex: makePageTexture('And some stories refuse to end.', { pageNumber: 3 }),
-  backTex: makePageVersoTexture(),
-  edgeColor: COLORS.pageEdge,
-});
-page3.position.z = leafDepths.page3;
-book.add(page3);
-
-const page2 = makeLeaf({
-  width: PAGE_W, height: PAGE_H, thickness: PAGE_T,
-  frontTex: makePageTexture('Some journeys change the person who takes them.', { pageNumber: 2 }),
-  backTex: makePageVersoTexture(),
-  edgeColor: COLORS.pageEdge,
-});
-page2.position.z = leafDepths.page2;
-book.add(page2);
-
-const page1 = makeLeaf({
-  width: PAGE_W, height: PAGE_H, thickness: PAGE_T,
-  frontTex: makePageTexture('Every story begins with a single page.', { pageNumber: 1 }),
-  backTex: makePageVersoTexture(),
-  edgeColor: COLORS.pageEdge,
-});
-page1.position.z = leafDepths.page1;
-book.add(page1);
-
-const frontCover = makeLeaf({
-  width: PAGE_W + 0.02, height: PAGE_H + 0.02, thickness: COVER_T,
-  frontTex: makeCoverFrontTexture(),
-  backTex: makeEndpaperTexture(),
-  edgeColor: COLORS.coverEdge,
-});
-frontCover.position.z = leafDepths.front;
-book.add(frontCover);
-
-const TURNING_LEAVES = { frontCover, page1, page2, page3 };
-
-/* ---------------------------------------------------------------------
-   7. Scroll choreography
-   --------------------------------------------------------------------- */
-
-const OPEN_ANGLE = -2.72; // radians a leaf rotates through when fully turned
-
-const LEAF_RANGES = {
-  frontCover: [0.10, 0.27],
-  page1:      [0.27, 0.45],
-  page2:      [0.45, 0.63],
-  page3:      [0.63, 0.82],
-};
-
-// lookX shifts the camera's focus point from the closed cover's centre (0)
-// toward the spine (-PAGE_W/2) once the book opens, since an open spread's
-// visual centre is the spine while a closed cover's centre sits half a
-// page-width to the right of it.
-const SPINE_X = -PAGE_W / 2;
-
-const CAM_KEYS = [
-  { p: 0.00, radius: 7.6, height: 2.15, angle: 0.34, lookY: 1.02, lookX: 0 },
-  { p: 0.10, radius: 5.8, height: 1.62, angle: 0.16, lookY: 1.02, lookX: 0 },
-  { p: 0.24, radius: 4.55, height: 1.35, angle: -0.06, lookY: 1.05, lookX: SPINE_X },
-  { p: 0.45, radius: 4.35, height: 1.30, angle: 0.08, lookY: 1.05, lookX: SPINE_X },
-  { p: 0.63, radius: 4.30, height: 1.28, angle: -0.09, lookY: 1.05, lookX: SPINE_X },
-  { p: 0.82, radius: 4.25, height: 1.26, angle: 0.05, lookY: 1.05, lookX: SPINE_X },
-  { p: 1.00, radius: 5.10, height: 1.55, angle: 0.00, lookY: 1.18, lookX: SPINE_X },
-];
-
-function clamp01(v) { return Math.min(1, Math.max(0, v)); }
-function smoothstep(t) { t = clamp01(t); return t * t * (3 - 2 * t); }
-function mapRange(p, a, b) { return clamp01((p - a) / (b - a)); }
-function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
-
-function interpKeyed(p, keys) {
-  if (p <= keys[0].p) return keys[0];
-  if (p >= keys[keys.length - 1].p) return keys[keys.length - 1];
-  for (let i = 0; i < keys.length - 1; i++) {
-    const a = keys[i], b = keys[i + 1];
-    if (p >= a.p && p <= b.p) {
-      const t = smoothstep((p - a.p) / (b.p - a.p));
-      return {
-        radius: a.radius + (b.radius - a.radius) * t,
-        height: a.height + (b.height - a.height) * t,
-        angle: a.angle + (b.angle - a.angle) * t,
-        lookY: a.lookY + (b.lookY - a.lookY) * t,
-        lookX: a.lookX + (b.lookX - a.lookX) * t,
-      };
+  function sparkle(n, cx, cy, sx, sy) {
+    for (let i = 0; i < n; i++) {
+      const life = rand(0.7, 1.5);
+      sparks.push({
+        x: cx + rand(-sx, sx), y: cy + rand(-sy, sy),
+        life, max: life, s: rand(6, 16), rot: rand(0, 3), vr: rand(-1.5, 1.5),
+        c: pick(['#F5D6A0', '#FFFFFF', '#C9B8FF', '#F5D6A0'])
+      });
     }
   }
-  return keys[keys.length - 1];
-}
 
-// Live state, written by updateScene() (scroll) and read every frame by animate()
-const camState = { radius: 7.6, height: 2.15, angle: 0.34, lookY: 1.02, lookX: 0 };
-const sceneState = { rimIntensity: 1.0, fogDensity: 0.095, bookRotY: 0.05 };
-
-const scrollHintEl = document.getElementById('scrollHint');
-const finaleEl = document.getElementById('finaleUI');
-
-function updateScene(p) {
-  const cam = interpKeyed(p, CAM_KEYS);
-  camState.radius = cam.radius;
-  camState.height = cam.height;
-  camState.angle = cam.angle;
-  camState.lookY = cam.lookY;
-  camState.lookX = cam.lookX;
-
-  sceneState.bookRotY = 0.05 - cam.angle * 0.35;
-  sceneState.rimIntensity = 0.75 + smoothstep(mapRange(p, 0.82, 1.0)) * 0.9;
-  sceneState.fogDensity = 0.095 - smoothstep(p) * 0.03;
-
-  for (const [name, [start, end]] of Object.entries(LEAF_RANGES)) {
-    const t = easeInOutCubic(mapRange(p, start, end));
-    const leaf = TURNING_LEAVES[name];
-    leaf.rotation.y = OPEN_ANGLE * t;
-    leaf.position.y = Math.sin(t * Math.PI) * 0.05; // gentle lift mid-turn
+  function drawStar(x, y, s, rot) {
+    fctx.save();
+    fctx.translate(x, y);
+    fctx.rotate(rot);
+    fctx.beginPath();
+    fctx.moveTo(0, -s);
+    fctx.quadraticCurveTo(0, 0, s, 0);
+    fctx.quadraticCurveTo(0, 0, 0, s);
+    fctx.quadraticCurveTo(0, 0, -s, 0);
+    fctx.quadraticCurveTo(0, 0, 0, -s);
+    fctx.fill();
+    fctx.restore();
   }
 
-  const hintOpacity = 1 - smoothstep(mapRange(p, 0.0, 0.045));
-  scrollHintEl.style.opacity = hintOpacity.toFixed(3);
+  let fxWasEmpty = true;
+  function stepFx(dt) {
+    const empty = !pieces.length && !sparks.length;
+    if (empty && fxWasEmpty) return;
+    fxWasEmpty = empty;
+    fctx.clearRect(0, 0, W, H);
 
-  const finaleOpacity = smoothstep(mapRange(p, 0.9, 1.0));
-  finaleEl.style.opacity = finaleOpacity.toFixed(3);
-  finaleEl.style.pointerEvents = finaleOpacity > 0.6 ? 'auto' : 'none';
-}
+    for (let i = pieces.length - 1; i >= 0; i--) {
+      const p = pieces[i];
+      p.t += dt;
+      p.vy = Math.min(p.vy + p.g * dt, p.max);
+      const d = Math.exp(-p.drag * dt);
+      p.vx *= d;
+      if (p.g > 100) p.vy *= Math.exp(-p.drag * 0.5 * dt); // burst slows its upward launch
+      p.x += (p.vx + Math.sin(p.t * p.sf + p.sp) * p.sway) * dt;
+      p.y += p.vy * dt;
+      p.rot += p.vr * dt;
+      p.flip += p.vf * dt;
+      if (p.y > H + 30 || p.x < -60 || p.x > W + 60) { pieces.splice(i, 1); continue; }
+      fctx.save();
+      fctx.translate(p.x, p.y);
+      fctx.rotate(p.rot);
+      fctx.scale(1, Math.cos(p.flip));
+      fctx.fillStyle = p.c;
+      if (p.round) { fctx.beginPath(); fctx.arc(0, 0, p.h * 0.6, 0, 6.283); fctx.fill(); }
+      else fctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      fctx.restore();
+    }
 
-updateScene(0);
-
-ScrollTrigger.create({
-  trigger: '.scroll-spacer',
-  start: 'top top',
-  end: 'bottom bottom',
-  scrub: 1.1,
-  onUpdate: (self) => updateScene(self.progress),
-});
-
-document.getElementById('readMoreBtn').addEventListener('click', () => {
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-});
-
-/* ---------------------------------------------------------------------
-   8. Mouse parallax
-   --------------------------------------------------------------------- */
-
-const mouse = { x: 0, y: 0, sx: 0, sy: 0 };
-window.addEventListener('pointermove', (e) => {
-  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-  mouse.y = (e.clientY / window.innerHeight) * 2 - 1;
-});
-
-/* ---------------------------------------------------------------------
-   9. Resize
-   --------------------------------------------------------------------- */
-
-function onResize() {
-  const w = window.innerWidth, h = window.innerHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-}
-window.addEventListener('resize', onResize);
-
-/* ---------------------------------------------------------------------
-   10. Animation loop
-   --------------------------------------------------------------------- */
-
-const clock = new THREE.Clock();
-const parallaxStrength = reducedMotion ? 0 : 1;
-
-function updateParticles(points, delta) {
-  const pos = points.geometry.attributes.position;
-  const vel = points.userData.velocities;
-  const halfY = points.userData.spread.y / 2;
-  for (let i = 0; i < vel.length; i++) {
-    let y = pos.getY(i) + vel[i] * delta;
-    if (y > halfY + 0.3) y = -0.3;
-    pos.setY(i, y);
+    fctx.globalCompositeOperation = 'lighter';
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      s.life -= dt;
+      if (s.life <= 0) { sparks.splice(i, 1); continue; }
+      s.rot += s.vr * dt;
+      const k = Math.sin(Math.PI * (1 - s.life / s.max));
+      fctx.globalAlpha = k * 0.95;
+      fctx.fillStyle = s.c;
+      drawStar(s.x, s.y, s.s * (0.4 + k * 0.8), s.rot);
+    }
+    fctx.globalAlpha = 1;
+    fctx.globalCompositeOperation = 'source-over';
   }
-  pos.needsUpdate = true;
-}
 
-function animate() {
-  requestAnimationFrame(animate);
-  const delta = Math.min(clock.getDelta(), 0.05);
-  const t = clock.getElapsedTime();
+  /* ============ 3D SCENE ============ */
+  function initThree() {
+    if (!window.THREE) return null;
+    const T = THREE;
+    let renderer;
+    try {
+      renderer = new T.WebGLRenderer({ canvas: $('scene'), antialias: !isMobile, alpha: true, powerPreference: 'high-performance' });
+    } catch (e) { return null; }
+    renderer.setClearColor(0x000000, 0);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = T.PCFSoftShadowMap;
 
-  mouse.sx += (mouse.x - mouse.sx) * 0.04;
-  mouse.sy += (mouse.y - mouse.sy) * 0.04;
+    const scene = new T.Scene();
+    const camera = new T.PerspectiveCamera(35, 1, 0.1, 200);
+    let dist = 14;
 
-  const bob = reducedMotion ? 0 : Math.sin(t * 0.55) * 0.035;
-  book.position.y = 1.02 + bob;
-  book.rotation.y = sceneState.bookRotY + mouse.sx * 0.05 * parallaxStrength;
-  book.rotation.x = mouse.sy * 0.018 * parallaxStrength;
+    // Helpers
+    const glowTex = (stops) => {
+      const c = document.createElement('canvas'); c.width = c.height = 128;
+      const g = c.getContext('2d');
+      const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+      stops.forEach(([o, col]) => gr.addColorStop(o, col));
+      g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+      return new T.CanvasTexture(c);
+    };
+    const additive = (map, opacity) => ({ map, transparent: true, opacity, blending: T.AdditiveBlending, depthWrite: false });
 
-  const angle = camState.angle + mouse.sx * 0.05 * parallaxStrength;
-  const height = camState.height + mouse.sy * 0.07 * parallaxStrength;
-  camera.position.set(
-    Math.sin(angle) * camState.radius,
-    height,
-    Math.cos(angle) * camState.radius
-  );
-  camera.lookAt(camState.lookX, camState.lookY, 0);
+    // Studio environment for real reflections on gold + frosting
+    try {
+      const ec = document.createElement('canvas'); ec.width = 512; ec.height = 256;
+      const e = ec.getContext('2d');
+      const eg = e.createLinearGradient(0, 0, 0, 256);
+      eg.addColorStop(0, '#2a2a5a'); eg.addColorStop(0.5, '#14183a'); eg.addColorStop(1, '#05060f');
+      e.fillStyle = eg; e.fillRect(0, 0, 512, 256);
+      e.fillStyle = '#fff1d6'; e.fillRect(60, 40, 90, 40); e.fillRect(330, 50, 70, 30);
+      e.fillStyle = '#9B87F5'; e.fillRect(220, 70, 50, 70);
+      e.fillStyle = '#6FA8FF'; e.fillRect(450, 60, 40, 60);
+      const envTex = new T.CanvasTexture(ec);
+      const pm = new T.PMREMGenerator(renderer);
+      scene.environment = pm.fromEquirectangular(envTex).texture;
+      pm.dispose();
+    } catch (err) { /* lighting still works without env map */ }
 
-  rimLight.intensity = sceneState.rimIntensity;
-  scene.fog.density = sceneState.fogDensity;
+    // Lights
+    scene.add(new T.HemisphereLight(0xb7a8ff, 0x141432, 0.55));
+    const key = new T.DirectionalLight(0xffe2b0, 1.1);
+    key.position.set(4, 7, 5);
+    key.castShadow = true;
+    key.shadow.mapSize.set(isMobile ? 512 : 1024, isMobile ? 512 : 1024);
+    Object.assign(key.shadow.camera, { left: -4, right: 4, top: 5, bottom: -5, near: 1, far: 20 });
+    key.shadow.bias = -0.0008;
+    scene.add(key);
+    const rim = new T.DirectionalLight(0x4c7dff, 0.9); rim.position.set(-5, 3, -4); scene.add(rim);
+    const fill = new T.PointLight(0x9b87f5, 0.8, 20); fill.position.set(-3, 1, 3); scene.add(fill);
+    const flameLight = new T.PointLight(0xffb060, 1.2, 6); flameLight.position.set(0, 1.9, 0); scene.add(flameLight);
 
-  rays.rotation.z = t * 0.015;
-  rays.children.forEach((r, i) => { r.material.opacity = 0.05 + Math.sin(t * 0.4 + i) * 0.015; });
+    // Glow behind + beneath the cake
+    const halo = new T.Sprite(new T.SpriteMaterial(additive(glowTex([[0, 'rgba(155,135,245,.85)'], [0.45, 'rgba(120,100,230,.28)'], [1, 'rgba(8,11,24,0)']]), 0.6)));
+    halo.position.set(0, 0, -1.8); halo.scale.set(9, 9, 1); halo.renderOrder = -2; scene.add(halo);
+    const floorGlow = new T.Mesh(new T.PlaneGeometry(8, 8), new T.MeshBasicMaterial(additive(glowTex([[0, 'rgba(245,214,160,.55)'], [0.5, 'rgba(155,135,245,.18)'], [1, 'rgba(0,0,0,0)']]), 0.8)));
+    floorGlow.rotation.x = -Math.PI / 2; floorGlow.position.y = -1.64; floorGlow.renderOrder = -1; scene.add(floorGlow);
+    const shadowFloor = new T.Mesh(new T.PlaneGeometry(14, 14), new T.ShadowMaterial({ opacity: 0.4 }));
+    shadowFloor.rotation.x = -Math.PI / 2; shadowFloor.position.y = -1.63; shadowFloor.receiveShadow = true; scene.add(shadowFloor);
 
-  dust.rotation.y = t * 0.008;
-  dust.position.x = mouse.sx * 0.12 * parallaxStrength;
-  updateParticles(dust, delta);
+    // Materials
+    const gold = new T.MeshStandardMaterial({ color: 0xf5d6a0, metalness: 0.9, roughness: 0.28 });
+    const frostMat = new T.MeshPhysicalMaterial({ color: 0xfff8ee, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.2 });
+    const body = (c) => new T.MeshPhysicalMaterial({ color: c, roughness: 0.45, clearcoat: 0.5, clearcoatRoughness: 0.35 });
 
-  glowMotes.rotation.y = -t * 0.006;
-  updateParticles(glowMotes, delta);
+    // Cake (visual center sits at the world origin)
+    const cake = new T.Group();
+    scene.add(cake);
+    const dummy = new T.Object3D();
+    const BASE = -1.6;
+    const tiers = [
+      { r: 1.5, h: 0.9, c: 0x8e78ee },
+      { r: 1.1, h: 0.8, c: 0xf0cf98 },
+      { r: 0.75, h: 0.7, c: 0xb6a5f8 }
+    ];
+    let y = BASE;
+    tiers.forEach((t, i) => {
+      const m = new T.Mesh(new T.CylinderGeometry(t.r, t.r, t.h, 64), body(t.c));
+      m.position.y = y + t.h / 2; m.castShadow = m.receiveShadow = true; cake.add(m);
 
-  renderer.render(scene, camera);
-}
+      const cap = new T.Mesh(new T.CylinderGeometry(t.r, t.r, 0.04, 64), frostMat);
+      cap.position.y = y + t.h; cap.castShadow = cap.receiveShadow = true; cake.add(cap);
+      const lip = new T.Mesh(new T.TorusGeometry(t.r - 0.01, 0.07, 16, 64), frostMat);
+      lip.rotation.x = Math.PI / 2; lip.position.y = y + t.h; cake.add(lip);
 
-/* ---------------------------------------------------------------------
-   11. Boot
-   --------------------------------------------------------------------- */
+      const band = new T.Mesh(new T.TorusGeometry(t.r + 0.005, 0.035, 12, 64), gold);
+      band.rotation.x = Math.PI / 2; band.position.y = y + 0.06; cake.add(band);
 
-function hideLoader() {
-  document.getElementById('loader').classList.add('hidden');
-}
+      // Frosting drips (one instanced draw call per tier)
+      const n = Math.round(t.r * 14);
+      const drips = new T.InstancedMesh(new T.SphereGeometry(1, 12, 12), frostMat, n);
+      for (let k = 0; k < n; k++) {
+        const a = (k / n) * Math.PI * 2 + rand(-0.05, 0.05), len = rand(0.12, 0.36);
+        dummy.position.set(Math.cos(a) * (t.r - 0.005), y + t.h - len * 0.5 - 0.02, Math.sin(a) * (t.r - 0.005));
+        dummy.scale.set(0.065, len * 0.5, 0.065);
+        dummy.updateMatrix(); drips.setMatrixAt(k, dummy.matrix);
+      }
+      cake.add(drips);
+      y += t.h;
+    });
 
-if (document.fonts && document.fonts.ready) {
-  document.fonts.ready.then(() => {
-    fontsReady = true;
-    setTimeout(hideLoader, 250);
-  });
-  setTimeout(hideLoader, 1800); // fallback in case font loading stalls
-} else {
-  setTimeout(hideLoader, 600);
-}
+    // Gold pearls around the base tier
+    const pn = 36;
+    const pearls = new T.InstancedMesh(new T.SphereGeometry(0.07, 14, 14), gold, pn);
+    for (let k = 0; k < pn; k++) {
+      const a = (k / pn) * Math.PI * 2;
+      dummy.position.set(Math.cos(a) * 1.62, BASE + 0.07, Math.sin(a) * 1.62);
+      dummy.scale.set(1, 1, 1); dummy.updateMatrix(); pearls.setMatrixAt(k, dummy.matrix);
+    }
+    pearls.castShadow = true; cake.add(pearls);
 
-animate();
+    // Plate
+    const plate = new T.Mesh(new T.CylinderGeometry(1.95, 2.05, 0.1, 80), gold);
+    plate.position.y = BASE - 0.05; plate.receiveShadow = true; cake.add(plate);
+
+    // Candles + flames
+    const flameTex = glowTex([[0, 'rgba(255,255,240,1)'], [0.25, 'rgba(255,214,130,.9)'], [0.6, 'rgba(255,140,40,.3)'], [1, 'rgba(255,100,0,0)']]);
+    const candleColors = [0xf5d6a0, 0xfff8ee, 0x9b87f5];
+    const flames = [];
+    const topY = y + 0.02;
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2 + Math.PI / 2;
+      const cx = Math.cos(a) * 0.4, cz = Math.sin(a) * 0.4;
+      const candle = new T.Mesh(new T.CylinderGeometry(0.045, 0.045, 0.5, 16),
+        new T.MeshStandardMaterial({ color: candleColors[i % 3], roughness: 0.5, metalness: i % 3 === 0 ? 0.5 : 0 }));
+      candle.position.set(cx, topY + 0.25, cz); candle.castShadow = true; cake.add(candle);
+      const wick = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, 0.07, 6), new T.MeshBasicMaterial({ color: 0x20160c }));
+      wick.position.set(cx, topY + 0.535, cz); cake.add(wick);
+
+      const flame = new T.Group();
+      flame.position.set(cx, topY + 0.68, cz);
+      const core = new T.Mesh(new T.SphereGeometry(0.05, 12, 12), new T.MeshBasicMaterial({ color: 0xffe3a0, transparent: true, opacity: 0.95 }));
+      core.scale.set(1, 2.3, 1);
+      const glow = new T.Sprite(new T.SpriteMaterial(additive(flameTex, 0.9)));
+      glow.scale.set(0.5, 0.5, 1);
+      flame.add(core, glow); cake.add(flame);
+      flames.push({ flame, core, glow, p: rand(0, 6.28), baseX: cx, baseZ: cz });
+    }
+
+    // Floating golden particles
+    const gN = isMobile ? 70 : 130;
+    const gPos = new Float32Array(gN * 3), gSpd = new Float32Array(gN);
+    for (let i = 0; i < gN; i++) {
+      gPos.set([rand(-7, 7), rand(-5.5, 5.5), rand(-4, 4)], i * 3);
+      gSpd[i] = rand(0.08, 0.3);
+    }
+    const gGeo = new T.BufferGeometry();
+    gGeo.setAttribute('position', new T.BufferAttribute(gPos, 3));
+    const gold3d = new T.Points(gGeo, new T.PointsMaterial({
+      size: 0.16, sizeAttenuation: true, depthWrite: false, blending: T.AdditiveBlending, transparent: true, opacity: 0.9,
+      map: glowTex([[0, 'rgba(255,240,200,1)'], [0.35, 'rgba(245,214,160,.55)'], [1, 'rgba(245,214,160,0)']])
+    }));
+    scene.add(gold3d);
+
+    // Twinkling star field (two layers twinkle in opposition)
+    const bg = new T.Group(); scene.add(bg);
+    const starTex = glowTex([[0, 'rgba(255,255,255,1)'], [0.3, 'rgba(190,210,255,.6)'], [1, 'rgba(190,210,255,0)']]);
+    const layers = [0, 1].map(() => {
+      const n = isMobile ? 90 : 150, pos = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const r = rand(24, 44), th = rand(0, 6.283), ph = Math.acos(rand(-0.6, 1));
+        pos.set([r * Math.sin(ph) * Math.cos(th), r * Math.cos(ph) * 0.8, -Math.abs(r * Math.sin(ph) * Math.sin(th)) - 6], i * 3);
+      }
+      const g = new T.BufferGeometry(); g.setAttribute('position', new T.BufferAttribute(pos, 3));
+      const mat = new T.PointsMaterial({ size: 0.6, map: starTex, transparent: true, depthWrite: false, blending: T.AdditiveBlending });
+      bg.add(new T.Points(g, mat));
+      return mat;
+    });
+
+    // Celebration shockwave ring
+    const ring = new T.Mesh(new T.RingGeometry(0.92, 1, 80), new T.MeshBasicMaterial({ color: 0xf5d6a0, transparent: true, opacity: 0, blending: T.AdditiveBlending, depthWrite: false, side: T.DoubleSide }));
+    ring.rotation.x = -Math.PI / 2; ring.position.y = BASE + 0.02; scene.add(ring);
+
+    // State
+    const mouse = { x: 0, y: 0 }, cur = { x: 0, y: 0 };
+    let tEntry = 0, boostV = 0, ringT = 2, spin = 0;
+
+    // Size the cake to fit the free space between the heading and the footer, centered on screen
+    function fit() {
+      const w = innerWidth, h = innerHeight;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isMobile ? 1.75 : 2));
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      const topB = document.querySelector('.top').getBoundingClientRect().bottom;
+      const botT = document.querySelector('.bottom').getBoundingClientRect().top;
+      let zone = 2 * Math.min(h / 2 - topB, botT - h / 2) * 0.9;
+      zone = Math.max(zone, h * 0.22);
+      zone = Math.min(zone, w * 0.92 * (3.4 / 3.9));
+      const visH = (3.4 * h) / zone;
+      dist = visH / (2 * Math.tan(T.MathUtils.degToRad(camera.fov / 2)));
+      camera.updateProjectionMatrix();
+    }
+
+    function update(dt, t) {
+      tEntry = Math.min(tEntry + dt, 2);
+      const e = 1 - Math.pow(1 - tEntry / 2, 3);
+      boostV = Math.max(0, boostV - dt * 0.55);
+      ringT += dt;
+
+      // Parallax
+      cur.x += (mouse.x - cur.x) * Math.min(1, dt * 3);
+      cur.y += (mouse.y - cur.y) * Math.min(1, dt * 3);
+      camera.position.set(cur.x * dist * 0.07, dist * 0.22 - cur.y * dist * 0.04, dist * 0.975);
+      camera.lookAt(0, 0, 0);
+      bg.rotation.set(cur.y * 0.03, cur.x * 0.05, 0);
+      gold3d.position.x = -cur.x * 0.45;
+
+      // Cake: slow rotation, entrance, celebration pulse
+      spin += dt * (reduce ? 0.05 : 0.16 + boostV * boostV * 2.4);
+      cake.rotation.y = spin;
+      const pulse = 1 + boostV * boostV * 0.05;
+      cake.scale.setScalar((0.82 + 0.18 * e) * pulse);
+      cake.position.y = (1 - e) * -0.7;
+
+      // Flames
+      flames.forEach((f) => {
+        const k = 1 + 0.12 * Math.sin(t * 13 + f.p) + 0.08 * Math.sin(t * 23 + f.p * 2);
+        f.core.scale.set(1 / Math.sqrt(k), 2.3 * k, 1 / Math.sqrt(k));
+        f.flame.position.x = f.baseX + Math.sin(t * 7 + f.p) * 0.006;
+        f.glow.material.opacity = 0.75 + 0.15 * Math.sin(t * 11 + f.p) + boostV * 0.2;
+      });
+      flameLight.intensity = 1.15 + 0.2 * Math.sin(t * 12) + 0.1 * Math.sin(t * 29) + boostV * 1.2;
+      key.intensity = 1.1 + boostV * 0.8;
+      halo.material.opacity = 0.6 + boostV * 0.4;
+      halo.scale.setScalar(9 + boostV * 2);
+
+      // Ring
+      ring.material.opacity = Math.max(0, 0.9 * (1 - ringT / 1.5));
+      ring.scale.setScalar(1 + ringT * 3.6);
+
+      // Particles + stars
+      for (let i = 0; i < gN; i++) {
+        let py = gPos[i * 3 + 1] + gSpd[i] * dt;
+        if (py > 5.5) py = -5.5;
+        gPos[i * 3 + 1] = py;
+        gPos[i * 3] += Math.sin(t * 0.6 + i) * 0.1 * dt;
+      }
+      gGeo.attributes.position.needsUpdate = true;
+      layers[0].opacity = 0.55 + 0.35 * Math.sin(t * 1.3);
+      layers[1].opacity = 0.55 + 0.35 * Math.sin(t * 1.3 + Math.PI);
+
+      renderer.render(scene, camera);
+    }
+
+    return {
+      fit, update,
+      restart() { tEntry = 0; },
+      boost() { boostV = 1; ringT = 0; },
+      setMouse(x, y) { mouse.x = x; mouse.y = y; }
+    };
+  }
+
+  /* ============ Sequence + interaction ============ */
+  const three = initThree();
+  const intro = $('intro'), main = $('main'), wish = $('wish'), actions = $('actions'), bgGlow = $('bgGlow');
+  const stages = [intro, main, wish, actions];
+  let timers = [];
+  const later = (fn, ms) => timers.push(setTimeout(fn, ms));
+  const count = (full, mobile, min) => (reduce ? min : isMobile ? mobile : full);
+
+  function play() {
+    timers.forEach(clearTimeout); timers = [];
+    stages.forEach((el) => el.classList.remove('in', 'out'));
+    void document.body.offsetWidth;
+    if (three) three.restart();
+    rain(count(170, 110, 40));
+
+    later(() => intro.classList.add('in'), 500);
+    later(() => { intro.classList.remove('in'); intro.classList.add('out'); }, 3200);
+    later(() => { main.classList.add('in'); sparkle(count(14, 9, 3), W / 2, H * 0.14, W * 0.25, 40); }, 3700);
+    later(() => wish.classList.add('in'), 5000);
+    later(() => actions.classList.add('in'), 5700);
+  }
+
+  function celebrate() {
+    burst(count(340, 200, 80));
+    if (three) three.boost();
+    bgGlow.classList.remove('flash'); void bgGlow.offsetWidth; bgGlow.classList.add('flash');
+    for (let i = 0; i < (reduce ? 3 : 14); i++) {
+      later(() => sparkle(isMobile ? 3 : 5, W / 2, H / 2, W * 0.4, H * 0.32), i * 110);
+    }
+  }
+
+  $('celebrate').addEventListener('click', celebrate);
+  $('replay').addEventListener('click', play);
+
+  // Parallax input
+  addEventListener('pointermove', (e) => {
+    if (three) three.setMouse((e.clientX / innerWidth) * 2 - 1, (e.clientY / innerHeight) * 2 - 1);
+  }, { passive: true });
+  document.documentElement.addEventListener('mouseleave', () => three && three.setMouse(0, 0));
+
+  // Resize handling
+  let resizeQueued = false;
+  function onResize() {
+    if (resizeQueued) return;
+    resizeQueued = true;
+    requestAnimationFrame(() => { resizeQueued = false; sizeFx(); if (three) three.fit(); });
+  }
+  addEventListener('resize', onResize);
+  addEventListener('orientationchange', onResize);
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(onResize);
+    ro.observe(document.querySelector('.top'));
+    ro.observe(document.querySelector('.bottom'));
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(onResize);
+
+  // Main loop
+  let last = performance.now(), time = 0;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now; time += dt;
+    if (three) three.update(dt, time);
+    stepFx(dt);
+  }
+
+  sizeFx();
+  if (three) three.fit();
+  play();
+  requestAnimationFrame(loop);
+})();
